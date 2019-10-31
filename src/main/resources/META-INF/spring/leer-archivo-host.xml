@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<beans
+	xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:osgi="http://www.springframework.org/schema/osgi"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans
+						http://www.springframework.org/schema/beans/spring-beans-2.5.xsd
+						http://www.springframework.org/schema/osgi
+						http://www.springframework.org/schema/osgi/spring-osgi-1.2.xsd
+						http://camel.apache.org/schema/spring
+						http://camel.apache.org/schema/spring/camel-spring.xsd">
+
+	<bean class="org.springframework.beans.factory.config.PropertyPlaceholderConfigurer">
+		<property name="locations" value="classpath:jdbc.properties" />
+	</bean>
+
+	<osgi:reference id="dataSource" interface="javax.sql.DataSource"/>
+
+	<bean id="sql" class="org.apache.camel.component.sql.SqlComponent">
+		<property name="dataSource" ref="dataSource" />
+	</bean>
+
+	<bean id="procesarArchivoBean"				class="ec.com.kruger.kruger.activemq.ProcesarArchivo" />
+	<bean id="insertarArchivoComprobanteBean"	class="ec.com.kruger.kruger.activemq.InsertarArchivoComprobanteBean" />
+	<bean id="exceptionLeerArchivoHostService"	class="ec.com.kruger.kruger.activemq.ExceptionLeerArchivoHostService" />
+
+	<camelContext xmlns="http://camel.apache.org/schema/spring">
+		<propertyPlaceholder location="classpath:propiedades.properties" id="leerArchivHostPropertiesId" />
+
+		<route id="leerArchivoRoute">
+			<from uri="file:{{sftp.dir.temp}}" />
+			<doTry>
+				<to uri="direct:ingresarArchivoComprobante" />
+				<doCatch>
+					<exception>java.lang.Exception</exception>
+					<bean ref="exceptionLeerArchivoHostService" method="procesarException" />
+					<to uri="amq:{{kr.control.ex.queue}}" />
+				</doCatch>
+			</doTry>
+		</route>
+
+		<route id="ingresarArchivoComprobanteRoute">
+			<from uri="direct:ingresarArchivoComprobante" />
+			<log message="Iniciando la carga de los comprobantes del archivo de Bg" />
+			<doTry>
+				<bean ref="insertarArchivoComprobanteBean" method="procesarArchivoCabecera" />
+				<setHeader headerName="originalBody">
+					<simple>${body}</simple>
+				</setHeader>
+				<bean ref="insertarArchivoComprobanteBean" method="convertirCabecera" />
+				<bean ref="insertarArchivoComprobanteBean" method="crearArchivoComprobante" />
+				<log message="Insertar registro en la tabla: FeArchivoComprobanteTbl" />
+				<to uri="sql:{{sql.sp.insert.archivo.comprobante}}" />
+				<bean ref="insertarArchivoComprobanteBean" method="obtenerIdArchivo" />
+				<setBody>
+					<simple>${headers.originalBody}</simple>
+				</setBody>
+				<setHeader headerName="originalBody">
+					<simple>null</simple>
+				</setHeader>
+				<to uri="direct:procesarArchivo" />
+				<doCatch>
+					<exception>java.lang.Exception</exception>
+					<bean ref="exceptionLeerArchivoHostService" method="procesarException" />
+					<to uri="amq:{{kr.control.ex.queue}}" />
+				</doCatch>
+			</doTry>
+		</route>
+		
+		<route id="procesarArchivoRoute">
+			<from uri="direct:procesarArchivo" />
+			<doTry>
+				<split streaming="true">
+					<tokenize token="{{token.split}}" />
+					<bean ref="procesarArchivoBean" method="procesarArchivo" />
+					<convertBodyTo type="java.lang.String"/>
+					<choice>
+						<when>
+							<simple>${body} != null</simple>
+							<to uri="amq:{{kr.msg.bg.queue}}" />
+							<choice>
+								<when>
+									<simple>${header.CamelSplitComplete}</simple>
+									<setHeader headerName="ComprobantesCargados">
+										<simple>${headers.CamelSplitSize}</simple>
+									</setHeader>
+									<setHeader headerName="fechaFinCarga">
+										<simple>${date:now:yyyy-MM-dd HH:mm:ss:SSS}</simple>
+									</setHeader>
+									<to uri="amq:{{kr.fin.carga.archivo.queue}}"/>
+								</when>
+							</choice>
+						</when>
+					</choice>
+				</split>
+				<doCatch>
+					<exception>java.lang.Exception</exception>
+					<bean ref="exceptionLeerArchivoHostService" method="procesarException" />
+					<to uri="amq:{{kr.control.ex.queue}}" />
+				</doCatch>
+			</doTry>
+		</route>
+	</camelContext>
+</beans>
